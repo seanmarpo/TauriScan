@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>TauriFuzz — Vulnerable Target Application</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+
+            body {
+                font-family:
+                    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                    Helvetica, Arial, sans-serif;
+                background: #1a1a2e;
+                color: #e0e0e0;
+                min-height: 100vh;
+                padding: 1.5rem;
+            }
+
+            h1 {
+                text-align: center;
+                font-size: 1.5rem;
+                font-weight: 600;
+                color: #c0c0ff;
+                margin-bottom: 0.75rem;
+            }
+
+            .warning {
+                background: #3a2a00;
+                border: 1px solid #7a6a20;
+                color: #f0d060;
+                text-align: center;
+                padding: 0.5rem 1rem;
+                border-radius: 6px;
+                font-size: 0.85rem;
+                margin-bottom: 1.5rem;
+            }
+
+            .grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 1.25rem;
+                max-width: 960px;
+                margin: 0 auto;
+            }
+
+            .card {
+                background: #16213e;
+                border: 1px solid #2a2a5a;
+                border-radius: 8px;
+                padding: 1.25rem;
+                display: flex;
+                flex-direction: column;
+                gap: 0.75rem;
+            }
+
+            .card h2 {
+                font-size: 1rem;
+                font-weight: 600;
+                color: #a0a0e0;
+            }
+
+            .input-row {
+                display: flex;
+                gap: 0.5rem;
+            }
+
+            input[type="text"],
+            textarea {
+                flex: 1;
+                background: #0f0f23;
+                border: 1px solid #2a2a5a;
+                border-radius: 4px;
+                color: #e0e0e0;
+                padding: 0.5rem 0.75rem;
+                font-family: inherit;
+                font-size: 0.85rem;
+                outline: none;
+            }
+
+            input[type="text"]:focus,
+            textarea:focus {
+                border-color: #5050a0;
+            }
+
+            textarea {
+                resize: vertical;
+                min-height: 80px;
+                font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+                font-size: 0.8rem;
+            }
+
+            button {
+                background: #2a2a6a;
+                border: 1px solid #4040a0;
+                border-radius: 4px;
+                color: #d0d0ff;
+                padding: 0.5rem 1rem;
+                font-size: 0.85rem;
+                cursor: pointer;
+                white-space: nowrap;
+                transition: background 0.15s;
+            }
+
+            button:hover {
+                background: #3a3a8a;
+            }
+            button:active {
+                background: #1a1a5a;
+            }
+
+            pre {
+                background: #0f0f23;
+                border: 1px solid #2a2a5a;
+                border-radius: 4px;
+                padding: 0.75rem;
+                font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+                font-size: 0.8rem;
+                color: #b0b0d0;
+                overflow-x: auto;
+                white-space: pre-wrap;
+                word-break: break-all;
+                min-height: 3rem;
+                max-height: 240px;
+                overflow-y: auto;
+                flex: 1;
+            }
+
+            @media (max-width: 700px) {
+                .grid {
+                    grid-template-columns: 1fr;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <h1>TauriFuzz &mdash; Vulnerable Target Application</h1>
+        <div class="warning">
+            &#9888;&#65039; This application is intentionally vulnerable. Do not
+            deploy in production.
+        </div>
+
+        <div class="grid">
+            <!-- File Reader -->
+            <div class="card">
+                <h2>File Reader</h2>
+                <div class="input-row">
+                    <input
+                        type="text"
+                        id="file-path"
+                        placeholder="e.g., secret.txt or ../../etc/passwd"
+                    />
+                    <button onclick="readFile()">Read File</button>
+                </div>
+                <pre id="file-output">Output will appear here...</pre>
+            </div>
+
+            <!-- Directory Listing -->
+            <div class="card">
+                <h2>Directory Listing</h2>
+                <div class="input-row">
+                    <input
+                        type="text"
+                        id="dir-path"
+                        placeholder="e.g., . or ../../etc"
+                    />
+                    <button onclick="listDirectory()">List Directory</button>
+                </div>
+                <pre id="dir-output">Output will appear here...</pre>
+            </div>
+
+            <!-- URL Fetcher -->
+            <div class="card">
+                <h2>URL Fetcher</h2>
+                <div class="input-row">
+                    <input
+                        type="text"
+                        id="fetch-url"
+                        placeholder="e.g., https://example.com or http://169.254.169.254/"
+                    />
+                    <button onclick="fetchUrl()">Fetch URL</button>
+                </div>
+                <pre id="fetch-output">Output will appear here...</pre>
+            </div>
+
+            <!-- Data Processor -->
+            <div class="card">
+                <h2>Data Processor</h2>
+                <textarea id="data-input">
+{"name": "test", "age": 25, "admin": false, "metadata": {"role": "user"}}</textarea
+                >
+                <button onclick="processData()">Process Data</button>
+                <pre id="data-output">Output will appear here...</pre>
+            </div>
+        </div>
+
+        <script>
+            const { invoke } = window.__TAURI__.core;
+
+            async function readFile() {
+                const output = document.getElementById("file-output");
+                const path = document.getElementById("file-path").value;
+                output.textContent = "Reading...";
+                try {
+                    const result = await invoke("read_file", { path });
+                    output.textContent = result;
+                } catch (e) {
+                    output.textContent = "Error: " + e;
+                }
+            }
+
+            async function listDirectory() {
+                const output = document.getElementById("dir-output");
+                const path = document.getElementById("dir-path").value;
+                output.textContent = "Listing...";
+                try {
+                    const result = await invoke("list_directory", { path });
+                    if (Array.isArray(result)) {
+                        output.textContent = result.join("\n");
+                    } else {
+                        output.textContent =
+                            typeof result === "string"
+                                ? result
+                                : JSON.stringify(result, null, 2);
+                    }
+                } catch (e) {
+                    output.textContent = "Error: " + e;
+                }
+            }
+
+            async function fetchUrl() {
+                const output = document.getElementById("fetch-output");
+                const url = document.getElementById("fetch-url").value;
+                output.textContent = "Fetching...";
+                try {
+                    const result = await invoke("fetch_url", { url });
+                    output.textContent =
+                        typeof result === "string"
+                            ? result
+                            : JSON.stringify(result, null, 2);
+                } catch (e) {
+                    output.textContent = "Error: " + e;
+                }
+            }
+
+            async function processData() {
+                const output = document.getElementById("data-output");
+                const raw = document.getElementById("data-input").value;
+                output.textContent = "Processing...";
+                try {
+                    const data = JSON.parse(raw);
+                    const result = await invoke("process_data", { data });
+                    output.textContent =
+                        typeof result === "string"
+                            ? result
+                            : JSON.stringify(result, null, 2);
+                } catch (e) {
+                    output.textContent = "Error: " + e;
+                }
+            }
+        </script>
+    </body>
+</html>

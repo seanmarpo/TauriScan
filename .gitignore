@@ -1,0 +1,28 @@
+# Rust / Cargo
+src-tauri/target/
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Tauri build artifacts
+src-tauri/gen/
+
+# Fuzzer output
+fuzz_config.json
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.code-workspace

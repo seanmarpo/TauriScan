@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Default capability for the vulnerable app",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:event:default"]
+}

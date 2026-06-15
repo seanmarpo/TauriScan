@@ -1,0 +1,11 @@
+{
+  "app_name": "TauriFuzz",
+  "version": "0.1.0",
+  "debug": true,
+  "api_key": "sk-FAKE-KEY-12345-NOT-REAL",
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "password": "super_secret_password_123"
+  }
+}
