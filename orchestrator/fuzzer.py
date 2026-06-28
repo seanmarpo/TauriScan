@@ -14,7 +14,10 @@ Usage:
 import argparse
 import asyncio
 import json
+import os
 import re
+import signal
+import subprocess
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -267,12 +270,12 @@ def is_ssrf_finding(payload: dict, response: dict) -> Finding | None:
 
 
 def is_panic_finding(payload: dict, response: dict) -> Finding | None:
-    """Check if the handler panicked (caught by catch_unwind)."""
+    """Check if the handler panicked."""
     if response.get("status") != "error":
         return None
 
     error_msg = response.get("error", "")
-    if not isinstance(error_msg, str) or not error_msg.startswith("PANIC:"):
+    if not isinstance(error_msg, str) or "panic" not in error_msg.lower():
         return None
 
     return Finding(
@@ -472,7 +475,7 @@ async def probe_command_args(
     return parse_args_from_error(error)
 
 
-async def setup_mode(output_path: str) -> None:
+async def setup_mode(output_path: str, app_manager=None) -> None:
     """
     Connect to the Tauri app, discover available commands, and write a
     configuration file template for the user to fill in.
@@ -481,6 +484,9 @@ async def setup_mode(output_path: str) -> None:
     and ``payload_type`` fields.  The user sets each one, then runs the
     fuzzer with ``--config``.
     """
+    if app_manager:
+        await app_manager.start()
+
     commands = await fetch_commands(WS_URI)
 
     if not commands:
@@ -488,6 +494,8 @@ async def setup_mode(output_path: str) -> None:
             "\n⚠️  No commands discovered. "
             "Is the app using tauri_plugin_fuzz_harness::generate_handler! ?"
         )
+        if app_manager:
+            await app_manager.stop()
         sys.exit(1)
 
     print(f"\n🔍 Discovered {len(commands)} command(s): {', '.join(commands)}\n")
@@ -544,6 +552,9 @@ async def setup_mode(output_path: str) -> None:
     print("  2. Verify the 'arg' fields and pick a 'payload_type' for each command")
     print(f"  3. Run:  python fuzzer.py --config {output_path}")
 
+    if app_manager:
+        await app_manager.stop()
+
 
 def load_config(path: str) -> list[dict]:
     """
@@ -597,13 +608,154 @@ def load_config(path: str) -> list[dict]:
     return payloads
 
 
-async def run_fuzzer(payloads: list[dict]) -> None:
+class SystemMonitor:
+    """
+    OS-level monitor wrapper for macOS (fs_usage / lsof).
+    Tracks underlying system calls made by the Tauri application to independently
+    confirm successful vulnerability exploitation (e.g. unauthorized filesystem/network access).
+    """
+    def __init__(self, pid: int | None = None):
+        self.pid = pid
+        self.proc: asyncio.subprocess.Process | None = None
+        self.running = False
+        self.alerts: list[str] = []
+
+    async def start(self):
+        self.running = True
+        if not self.pid:
+            print("  ⚠️ SystemMonitor: No target PID available for monitoring.")
+            return
+
+        print(f"  🛡️ SystemMonitor: Initializing OS-level monitoring for PID {self.pid}...")
+        try:
+            # Check if we can run fs_usage without password prompt
+            test_proc = await asyncio.create_subprocess_exec(
+                "sudo", "-n", "fs_usage", "-w", "-f", "filesys", str(self.pid),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            await asyncio.sleep(0.5)
+            if test_proc.returncode is not None and test_proc.returncode != 0:
+                print("  ⚠️ SystemMonitor: 'sudo fs_usage' requires root/password. Falling back to active lsof monitoring.")
+                self.proc = None
+                asyncio.create_task(self._poll_lsof())
+            else:
+                print(f"  🛡️ SystemMonitor: Successfully attached fs_usage to PID {self.pid}.")
+                self.proc = test_proc
+                asyncio.create_task(self._read_fs_usage())
+        except Exception as exc:
+            print(f"  ⚠️ SystemMonitor: Monitoring startup failed ({exc}).")
+
+    async def _read_fs_usage(self):
+        if not self.proc or not self.proc.stdout:
+            return
+        while self.running:
+            line = await self.proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode(errors="ignore")
+            if any(target in text for target in ["/etc/passwd", "169.254", "127.0.0.1", "httpbin"]):
+                clean_line = text.strip()
+                self.alerts.append(f"Syscall match: {clean_line}")
+
+    async def _poll_lsof(self):
+        while self.running:
+            if not self.pid:
+                break
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "lsof", "-p", str(self.pid),
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await proc.communicate()
+                text = stdout.decode(errors="ignore")
+                for line in text.splitlines():
+                    if any(target in line for target in ["/etc/passwd", "169.254", "127.0.0.1", "httpbin"]):
+                        self.alerts.append(f"lsof match: {line.strip()}")
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
+
+    async def stop(self):
+        self.running = False
+        if self.proc:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+
+
+class AppManager:
+    """
+    Manages the lifecycle of the target Tauri application (spawning, monitoring, restarting).
+    Grants the orchestrator full control over the fuzzing workflow.
+    """
+    def __init__(self, app_dir: str, enable_monitor: bool = False):
+        self.app_dir = app_dir
+        self.enable_monitor = enable_monitor
+        self.proc: asyncio.subprocess.Process | None = None
+        self.monitor: SystemMonitor | None = None
+
+    async def start(self):
+        print(f"📦 Launching target Tauri application in '{self.app_dir}'...")
+        try:
+            self.proc = await asyncio.create_subprocess_exec(
+                "cargo", "tauri", "dev",
+                cwd=self.app_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            print(f"  🚀 Subprocess spawned (PID: {self.proc.pid}). Waiting for WebSocket server...")
+            # Wait for app to warm up and open WebSocket
+            for _ in range(15):
+                try:
+                    ws = await websockets.connect(WS_URI)
+                    await ws.close()
+                    print("  ✅ Tauri application is ready and listening!")
+                    if self.enable_monitor:
+                        self.monitor = SystemMonitor(self.proc.pid)
+                        await self.monitor.start()
+                    return
+                except Exception:
+                    await asyncio.sleep(2.0)
+            print("  ⚠️ Timed out waiting for WebSocket server. Fuzzing may fail.")
+        except Exception as exc:
+            print(f"  ❌ Failed to spawn Tauri application: {exc}")
+
+    async def restart(self):
+        print("\n  🔄 AppManager: Restarting target Tauri application after crash...")
+        await self.stop()
+        await asyncio.sleep(1.0)
+        await self.start()
+
+    async def stop(self):
+        if self.monitor:
+            await self.monitor.stop()
+        if self.proc:
+            print("  🛑 AppManager: Terminating Tauri subprocess and all child processes...")
+            try:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+            except Exception:
+                pass
+            try:
+                subprocess.run(["pkill", "-9", "-f", "taurifuzz"], capture_output=True)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(self.proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
+            self.proc = None
+
+
+async def run_fuzzer(payloads: list[dict], app_manager: AppManager | None = None) -> None:
     """
     Run the fuzzer: connect to the WebSocket server, send every payload,
     collect results, and print a final summary with findings.
 
     Args:
         payloads: A list of dicts, each with 'command' and 'args' keys.
+        app_manager: Optional AppManager instance managing the Tauri subprocess.
     """
     stats = FuzzStats(total=len(payloads))
 
@@ -632,7 +784,7 @@ async def run_fuzzer(payloads: list[dict]) -> None:
 
         response = await send_payload(ws, payload)
 
-        # Handle disconnection with one reconnect attempt
+        # Handle disconnection with automated recovery or reconnect attempt
         if response["status"] == "disconnect":
             stats.disconnect += 1
             print(f"  💥 Disconnected! ({response.get('error', '')})")
@@ -646,16 +798,20 @@ async def run_fuzzer(payloads: list[dict]) -> None:
                 )
             )
 
-            print("  🔄 Attempting reconnect in 3s...")
-            await asyncio.sleep(3.0)
+            if app_manager:
+                print("  🔄 Crash detected! AppManager initiating automated recovery...")
+                await app_manager.restart()
+            else:
+                print("  🔄 Attempting reconnect in 3s...")
+                await asyncio.sleep(3.0)
+
             try:
                 ws = await try_connect(WS_URI, retries=0)
-                print("  ✅ Reconnected!")
-                # Re-send the payload that caused the disconnect
-                response = await send_payload(ws, payload)
-                if response["status"] == "disconnect":
-                    print("  💥 Disconnected again — skipping remaining payloads")
-                    break
+                print("  ✅ Reconnected! Skipping the crashing payload and proceeding to the next.")
+                # We do not re-send the payload that caused the disconnect, because if it's a hard panic/crash,
+                # it will simply crash the app again in an infinite loop or break the run.
+                print()
+                continue
             except Exception as exc:
                 print(f"  💥 Reconnect failed: {exc} — skipping remaining payloads")
                 break
@@ -684,6 +840,12 @@ async def run_fuzzer(payloads: list[dict]) -> None:
             print(
                 f"  🚨 FINDING [{finding.severity}] {finding.category}: {finding.description}"
             )
+
+        # Check for OS-level monitor alerts
+        if app_manager and app_manager.monitor and app_manager.monitor.alerts:
+            for alert in app_manager.monitor.alerts:
+                print(f"  🛡️ OS MONITOR ALERT: {alert}")
+            app_manager.monitor.alerts.clear()
 
         print()
 
@@ -760,6 +922,23 @@ def load_payloads(path: str) -> list[dict]:
     return data
 
 
+async def async_main(args, payloads=None):
+    app_manager = AppManager(args.spawn, enable_monitor=args.monitor) if args.spawn is not None else None
+
+    if args.setup:
+        await setup_mode(args.output, app_manager=app_manager)
+        return
+
+    if app_manager:
+        await app_manager.start()
+
+    try:
+        await run_fuzzer(payloads, app_manager=app_manager)
+    finally:
+        if app_manager:
+            await app_manager.stop()
+
+
 def main() -> None:
     """Entry point: parse CLI arguments and launch the async fuzzer."""
     parser = argparse.ArgumentParser(
@@ -793,42 +972,35 @@ def main() -> None:
         metavar="FILE",
         help=f"Output path for --setup mode (default: {DEFAULT_CONFIG_PATH}).",
     )
+    parser.add_argument(
+        "--spawn",
+        nargs="?",
+        const=".",
+        default=None,
+        help="Automatically launch the Tauri application via `cargo tauri dev` in the specified directory (default: current directory).",
+    )
+    parser.add_argument(
+        "--monitor",
+        action="store_true",
+        help="Enable OS-level system monitoring (e.g. fs_usage/lsof on macOS) to confirm vulnerability exploitation at the syscall level.",
+    )
 
     args = parser.parse_args()
 
-    # -- Setup mode -----------------------------------------------------------
     if args.setup:
-        try:
-            asyncio.run(setup_mode(args.output))
-        except KeyboardInterrupt:
-            print("\n\n⛔ Interrupted by user")
-            sys.exit(130)
-        return
-
-    # -- Config mode ----------------------------------------------------------
-    if args.config:
+        payloads = None
+    elif args.config:
         payloads = load_config(args.config)
-        print(f"📂 Loaded config from {args.config} → {len(payloads)} payload(s)")
-        print()
-        try:
-            asyncio.run(run_fuzzer(payloads))
-        except KeyboardInterrupt:
-            print("\n\n⛔ Interrupted by user")
-            sys.exit(130)
-        return
-
-    # -- Payload mode (existing behaviour) ------------------------------------
-    if args.payload_file:
+        print(f"📂 Loaded config from {args.config} → {len(payloads)} payload(s)\n")
+    elif args.payload_file:
         payloads = load_payloads(args.payload_file)
-        print(f"📂 Loaded {len(payloads)} payloads from {args.payload_file}")
+        print(f"📂 Loaded {len(payloads)} payloads from {args.payload_file}\n")
     else:
         payloads = TEST_PAYLOADS
-        print(f"📦 Using {len(payloads)} built-in test payloads")
-
-    print()
+        print(f"📦 Using {len(payloads)} built-in test payloads\n")
 
     try:
-        asyncio.run(run_fuzzer(payloads))
+        asyncio.run(async_main(args, payloads))
     except KeyboardInterrupt:
         print("\n\n⛔ Interrupted by user")
         sys.exit(130)

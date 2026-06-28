@@ -1,41 +1,10 @@
 use serde_json::Value;
 use std::fs;
-use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 
 /// Hardcoded "safe" base directory for file operations.
 /// In a real application this would be a sandboxed app-data directory.
 const BASE_DIR: &str = "./safe_files/";
-
-// ---------------------------------------------------------------------------
-// Panic boundary for fuzzing
-// ---------------------------------------------------------------------------
-// Wraps a closure in `catch_unwind` so that panics inside vulnerable command
-// handlers are captured as `Err("PANIC: ...")` rather than crashing the
-// process.  This keeps the app alive during fuzzing while still surfacing the
-// panic (which IS the vulnerability) as an observable error.
-//
-// NOTE: The vulnerable handler logic is unchanged — `.unwrap()` calls still
-// fire and panic.  This wrapper is a harness concern, not a security fix.
-// ---------------------------------------------------------------------------
-fn catch_panic<F, T>(f: F) -> Result<T, String>
-where
-    F: FnOnce() -> Result<T, String> + panic::UnwindSafe,
-{
-    match panic::catch_unwind(f) {
-        Ok(result) => result,
-        Err(payload) => {
-            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-                (*s).to_string()
-            } else if let Some(s) = payload.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "unknown panic".to_string()
-            };
-            Err(format!("PANIC: {}", msg))
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Command: read_file
@@ -54,12 +23,10 @@ where
 // ---------------------------------------------------------------------------
 #[tauri::command]
 fn read_file(path: String) -> Result<String, String> {
-    catch_panic(move || {
-        // VULNERABILITY: direct concatenation — no traversal guard
-        let full_path = PathBuf::from(BASE_DIR).join(&path);
+    // VULNERABILITY: direct concatenation — no traversal guard
+    let full_path = PathBuf::from(BASE_DIR).join(&path);
 
-        fs::read_to_string(&full_path).map_err(|e| format!("Failed to read file: {}", e))
-    })
+    fs::read_to_string(&full_path).map_err(|e| format!("Failed to read file: {}", e))
 }
 
 // ---------------------------------------------------------------------------
@@ -72,24 +39,22 @@ fn read_file(path: String) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 #[tauri::command]
 fn list_directory(path: String) -> Result<Value, String> {
-    catch_panic(move || {
-        // VULNERABILITY: direct concatenation — no traversal guard
-        let full_path = PathBuf::from(BASE_DIR).join(&path);
+    // VULNERABILITY: direct concatenation — no traversal guard
+    let full_path = PathBuf::from(BASE_DIR).join(&path);
 
-        let entries =
-            fs::read_dir(&full_path).map_err(|e| format!("Failed to list directory: {}", e))?;
+    let entries =
+        fs::read_dir(&full_path).map_err(|e| format!("Failed to list directory: {}", e))?;
 
-        let mut names: Vec<String> = Vec::new();
-        for entry in entries {
-            if let Ok(entry) = entry {
-                if let Some(name) = entry.file_name().to_str() {
-                    names.push(name.to_owned());
-                }
+    let mut names: Vec<String> = Vec::new();
+    for entry in entries {
+        if let Ok(entry) = entry {
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_owned());
             }
         }
+    }
 
-        serde_json::to_value(names).map_err(|e| format!("Serialization error: {}", e))
-    })
+    serde_json::to_value(names).map_err(|e| format!("Serialization error: {}", e))
 }
 
 // ---------------------------------------------------------------------------
@@ -111,19 +76,17 @@ fn list_directory(path: String) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 #[tauri::command]
 fn fetch_url(url: String) -> Result<String, String> {
-    catch_panic(AssertUnwindSafe(move || {
-        // VULNERABILITY: no scheme/domain/IP validation — full SSRF
-        let client = reqwest::blocking::Client::new();
+    // VULNERABILITY: no scheme/domain/IP validation — full SSRF
+    let client = reqwest::blocking::Client::new();
 
-        let response = client
-            .get(&url)
-            .send()
-            .map_err(|e| format!("Request failed: {}", e))?;
+    let response = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("Request failed: {}", e))?;
 
-        response
-            .text()
-            .map_err(|e| format!("Failed to read response body: {}", e))
-    }))
+    response
+        .text()
+        .map_err(|e| format!("Failed to read response body: {}", e))
 }
 
 // ---------------------------------------------------------------------------
@@ -149,29 +112,27 @@ fn fetch_url(url: String) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 #[tauri::command]
 fn process_data(data: Value) -> Result<String, String> {
-    catch_panic(AssertUnwindSafe(move || {
-        // VULNERABILITY: blindly unwrapping — panics on unexpected types
-        let name = data["name"].as_str().unwrap();
+    // VULNERABILITY: blindly unwrapping — panics on unexpected types
+    let name = data["name"].as_str().unwrap();
 
-        // VULNERABILITY: assumes numeric type, no bounds/overflow check
-        let age = data["age"].as_f64().unwrap();
-        let age_in_months = age * 12.0;
+    // VULNERABILITY: assumes numeric type, no bounds/overflow check
+    let age = data["age"].as_f64().unwrap();
+    let age_in_months = age * 12.0;
 
-        // VULNERABILITY: blindly unwrapping nested field that may not exist
-        let is_admin = data["admin"].as_bool().unwrap();
+    // VULNERABILITY: blindly unwrapping nested field that may not exist
+    let is_admin = data["admin"].as_bool().unwrap();
 
-        // VULNERABILITY: deep nested access with no existence check — panics if
-        // "metadata" is missing or is not an object
-        let role = data["metadata"]["role"].as_str().unwrap();
+    // VULNERABILITY: deep nested access with no existence check — panics if
+    // "metadata" is missing or is not an object
+    let role = data["metadata"]["role"].as_str().unwrap();
 
-        // VULNERABILITY: constructing output from unvalidated, unsanitized input
-        let result = format!(
-            "Processed: name={}, age_in_months={}, admin={}, role={}",
-            name, age_in_months, is_admin, role
-        );
+    // VULNERABILITY: constructing output from unvalidated, unsanitized input
+    let result = format!(
+        "Processed: name={}, age_in_months={}, admin={}, role={}",
+        name, age_in_months, is_admin, role
+    );
 
-        Ok(result)
-    }))
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
