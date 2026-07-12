@@ -1,0 +1,124 @@
+[
+    {
+        "command": "read_file",
+        "args": {
+            "path": "readme.txt"
+        }
+    },
+    {
+        "command": "read_file",
+        "args": {
+            "path": "../../../etc/passwd"
+        }
+    },
+    {
+        "command": "read_file",
+        "args": {
+            "path": "....//....//....//etc/passwd"
+        }
+    },
+    {
+        "command": "read_file",
+        "args": {
+            "path": "..\\..\\..\\etc\\passwd"
+        }
+    },
+    {
+        "command": "read_file",
+        "args": {
+            "path": "%2e%2e%2f%2e%2e%2fetc%2fpasswd"
+        }
+    },
+    {
+        "command": "read_file",
+        "args": {
+            "path": "..%252f..%252f..%252fetc/passwd"
+        }
+    },
+    {
+        "command": "read_file",
+        "args": {
+            "path": "/etc/passwd"
+        }
+    },
+    {
+        "command": "fetch_url",
+        "args": {
+            "url": "https://httpbin.org/get"
+        }
+    },
+    {
+        "command": "fetch_url",
+        "args": {
+            "url": "http://127.0.0.1"
+        }
+    },
+    {
+        "command": "fetch_url",
+        "args": {
+            "url": "http://169.254.169.254/latest/meta-data/"
+        }
+    },
+    {
+        "command": "fetch_url",
+        "args": {
+            "url": "file:///etc/passwd"
+        }
+    },
+    {
+        "command": "fetch_url",
+        "args": {
+            "url": "http://[::1]/"
+        }
+    },
+    {
+        "command": "fetch_url",
+        "args": {
+            "url": "http://0x7f000001/"
+        }
+    },
+    {
+        "command": "process_data",
+        "args": {
+            "data": {
+                "name": "test",
+                "age": 25,
+                "admin": false,
+                "metadata": {
+                    "role": "user"
+                }
+            }
+        }
+    },
+    {
+        "command": "process_data",
+        "args": {
+            "data": {
+                "name": 12345,
+                "age": "not_a_number",
+                "admin": "yes",
+                "metadata": {
+                    "role": null
+                }
+            }
+        }
+    },
+    {
+        "command": "process_data",
+        "args": {
+            "data": {}
+        }
+    },
+    {
+        "command": "process_data",
+        "args": {
+            "data": "just a string"
+        }
+    },
+    {
+        "command": "process_data",
+        "args": {
+            "data": null
+        }
+    }
+]

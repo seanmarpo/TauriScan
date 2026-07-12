@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 /// Hardcoded "safe" base directory for file operations.
 /// In a real application this would be a sandboxed app-data directory.
-const BASE_DIR: &str = "./safe_files/";
+const BASE_DIR: &str = "../safe_files/";
 
 // ---------------------------------------------------------------------------
 // Command: read_file
@@ -29,6 +29,13 @@ fn read_file(path: String) -> Result<String, String> {
     fs::read_to_string(&full_path).map_err(|e| format!("Failed to read file: {}", e))
 }
 
+#[tauri::command]
+fn secure_read_file(path: String) -> Result<String, String> {
+    let base = PathBuf::from(BASE_DIR);
+    let secure_path = tauri_secure_utils::fs::resolve_safe_path(&base, &path)?;
+    fs::read_to_string(&secure_path).map_err(|e| format!("Failed to read file: {}", e))
+}
+
 // ---------------------------------------------------------------------------
 // Command: list_directory
 // ---------------------------------------------------------------------------
@@ -44,6 +51,26 @@ fn list_directory(path: String) -> Result<Value, String> {
 
     let entries =
         fs::read_dir(&full_path).map_err(|e| format!("Failed to list directory: {}", e))?;
+
+    let mut names: Vec<String> = Vec::new();
+    for entry in entries {
+        if let Ok(entry) = entry {
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_owned());
+            }
+        }
+    }
+
+    serde_json::to_value(names).map_err(|e| format!("Serialization error: {}", e))
+}
+
+#[tauri::command]
+fn secure_list_directory(path: String) -> Result<Value, String> {
+    let base = PathBuf::from(BASE_DIR);
+    let secure_path = tauri_secure_utils::fs::resolve_safe_path(&base, &path)?;
+
+    let entries =
+        fs::read_dir(&secure_path).map_err(|e| format!("Failed to list directory: {}", e))?;
 
     let mut names: Vec<String> = Vec::new();
     for entry in entries {
@@ -81,6 +108,21 @@ fn fetch_url(url: String) -> Result<String, String> {
 
     let response = client
         .get(&url)
+        .send()
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    response
+        .text()
+        .map_err(|e| format!("Failed to read response body: {}", e))
+}
+
+#[tauri::command]
+fn secure_fetch_url(url: String) -> Result<String, String> {
+    let secure_url = tauri_secure_utils::net::validate_url_safe(&url)?;
+    
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .get(secure_url.as_str())
         .send()
         .map_err(|e| format!("Request failed: {}", e))?;
 
@@ -147,6 +189,9 @@ pub fn run() {
             list_directory,
             fetch_url,
             process_data,
+            secure_read_file,
+            secure_list_directory,
+            secure_fetch_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

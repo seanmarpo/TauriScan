@@ -1,13 +1,13 @@
 [workspace]
-members = [".", "tauri-plugin-fuzz-harness"]
+members = [".", "tauri-plugin-fuzz-harness", "tauri-secure-utils"]
 
 [package]
-name = "taurifuzz"
+name = "tauriscan"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "taurifuzz"
+name = "tauriscan"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]
@@ -20,3 +20,4 @@ serde_json = "1"
 reqwest = { version = "0.12", features = ["blocking"] }
 tokio = { version = "1", features = ["full"] }
 tauri-plugin-fuzz-harness = { path = "./tauri-plugin-fuzz-harness" }
+tauri-secure-utils = { version = "0.1.0", path = "tauri-secure-utils" }

@@ -7,8 +7,8 @@ running at ws://127.0.0.1:31337, then analyzes the responses for potential
 vulnerabilities including path traversal, SSRF, and type confusion issues.
 
 Usage:
-    python fuzzer.py                  # Run with built-in test payloads
-    python fuzzer.py payloads.json    # Run with custom payload file
+    python scanner.py                  # Run with built-in test payloads
+    python scanner.py payloads.json    # Run with custom payload file
 """
 
 import argparse
@@ -28,7 +28,7 @@ from websockets.exceptions import ConnectionClosed, InvalidURI, WebSocketExcepti
 
 WS_URI = "ws://127.0.0.1:31337"
 DEFAULT_TIMEOUT = 15
-DEFAULT_CONFIG_PATH = "fuzz_config.json"
+DEFAULT_CONFIG_PATH = "scan_config.json"
 
 # ---------------------------------------------------------------------------
 # Preset payload collections keyed by vulnerability category.
@@ -218,6 +218,17 @@ class Finding:
 
 
 @dataclass
+class CommandStats:
+    """Statistics for a specific Tauri command/endpoint."""
+    payloads_sent: int = 0
+    success: int = 0
+    error: int = 0
+    timeout: int = 0
+    disconnect: int = 0
+    deadlock: int = 0
+    vulnerabilities_found: set[str] = field(default_factory=set)
+
+@dataclass
 class FuzzStats:
     """Accumulated statistics for a fuzz run."""
 
@@ -226,7 +237,10 @@ class FuzzStats:
     error: int = 0
     timeout: int = 0
     disconnect: int = 0
+    deadlock: int = 0
     findings: list = field(default_factory=list)
+    command_stats: dict[str, CommandStats] = field(default_factory=dict)
+    total_endpoints_discovered: int = 0
 
 
 def is_path_traversal_finding(payload: dict, response: dict) -> Finding | None:
@@ -309,6 +323,7 @@ def check_findings(payload: dict, response: dict) -> list[Finding]:
         is_panic_finding,
         is_timeout_finding,
     ]
+    import datetime
     return [f for det in detectors if (f := det(payload, response)) is not None]
 
 
@@ -357,10 +372,10 @@ async def send_payload(ws, payload: dict, timeout: int = DEFAULT_TIMEOUT) -> dic
     except asyncio.TimeoutError:
         return {
             "id": msg_id,
-            "status": "timeout",
+            "status": "deadlock",
             "command": payload["command"],
             "result": None,
-            "error": f"No response within {timeout}s",
+            "error": f"No response within {timeout}s (Deadlock)",
         }
     except ConnectionClosed:
         return {
@@ -550,7 +565,7 @@ async def setup_mode(output_path: str, app_manager=None) -> None:
     print("Next steps:")
     print(f"  1. Open {output_path} in your editor")
     print("  2. Verify the 'arg' fields and pick a 'payload_type' for each command")
-    print(f"  3. Run:  python fuzzer.py --config {output_path}")
+    print(f"  3. Run:  python scanner.py --config {output_path}")
 
     if app_manager:
         await app_manager.stop()
@@ -610,78 +625,92 @@ def load_config(path: str) -> list[dict]:
 
 class SystemMonitor:
     """
-    OS-level monitor wrapper for macOS (fs_usage / lsof).
+    OS-level monitor wrapper for macOS (fs_usage).
     Tracks underlying system calls made by the Tauri application to independently
     confirm successful vulnerability exploitation (e.g. unauthorized filesystem/network access).
     """
-    def __init__(self, pid: int | None = None):
-        self.pid = pid
+    def __init__(self, target_name: str = "tauriscan"):
+        self.target_name = target_name
         self.proc: asyncio.subprocess.Process | None = None
-        self.running = False
-        self.alerts: list[str] = []
+        self.log_file = "/tmp/fuzz_fs.log"
+        self.records = []
 
     async def start(self):
-        self.running = True
-        if not self.pid:
-            print("  ⚠️ SystemMonitor: No target PID available for monitoring.")
-            return
-
-        print(f"  🛡️ SystemMonitor: Initializing OS-level monitoring for PID {self.pid}...")
+        print(f"  🛡️ SystemMonitor: Starting background OS monitor logging to {self.log_file}...")
         try:
-            # Check if we can run fs_usage without password prompt
-            test_proc = await asyncio.create_subprocess_exec(
-                "sudo", "-n", "fs_usage", "-w", "-f", "filesys", str(self.pid),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            self.proc = await asyncio.create_subprocess_exec(
+                "sudo", "-n", "fs_usage", "-w", self.target_name,
+                stdout=open(self.log_file, "a"),
+                stderr=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.DEVNULL
             )
-            await asyncio.sleep(0.5)
-            if test_proc.returncode is not None and test_proc.returncode != 0:
-                print("  ⚠️ SystemMonitor: 'sudo fs_usage' requires root/password. Falling back to active lsof monitoring.")
-                self.proc = None
-                asyncio.create_task(self._poll_lsof())
-            else:
-                print(f"  🛡️ SystemMonitor: Successfully attached fs_usage to PID {self.pid}.")
-                self.proc = test_proc
-                asyncio.create_task(self._read_fs_usage())
-        except Exception as exc:
-            print(f"  ⚠️ SystemMonitor: Monitoring startup failed ({exc}).")
-
-    async def _read_fs_usage(self):
-        if not self.proc or not self.proc.stdout:
-            return
-        while self.running:
-            line = await self.proc.stdout.readline()
-            if not line:
-                break
-            text = line.decode(errors="ignore")
-            if any(target in text for target in ["/etc/passwd", "169.254", "127.0.0.1", "httpbin"]):
-                clean_line = text.strip()
-                self.alerts.append(f"Syscall match: {clean_line}")
-
-    async def _poll_lsof(self):
-        while self.running:
-            if not self.pid:
-                break
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    "lsof", "-p", str(self.pid),
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                )
-                stdout, _ = await proc.communicate()
-                text = stdout.decode(errors="ignore")
-                for line in text.splitlines():
-                    if any(target in line for target in ["/etc/passwd", "169.254", "127.0.0.1", "httpbin"]):
-                        self.alerts.append(f"lsof match: {line.strip()}")
-            except Exception:
-                pass
-            await asyncio.sleep(1.0)
+                await asyncio.wait_for(self.proc.wait(), timeout=1.0)
+                if self.proc.returncode is not None:
+                    print("  ❌ SystemMonitor: 'sudo fs_usage' failed (did you forget to run `sudo -v` first?). Exiting.")
+                    import sys
+                    sys.exit(1)
+            except asyncio.TimeoutError:
+                pass # Still running, good!
+        except Exception as exc:
+            print(f"  ❌ SystemMonitor: failed to start ({exc})")
+            import sys
+            sys.exit(1)
 
     async def stop(self):
-        self.running = False
         if self.proc:
             try:
-                self.proc.kill()
+                self.proc.terminate()
             except Exception:
                 pass
+            import subprocess
+            subprocess.run(["sudo", "-n", "pkill", "-15", "fs_usage"], capture_output=True)
+            await asyncio.sleep(0.5)
+
+    def correlate(self):
+        print(f"\n🔬 SystemMonitor: Correlating OS-level syscalls from trace log...")
+        import os
+        if not os.path.exists(self.log_file):
+            return
+
+        with open(self.log_file, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                parts = line.split(maxsplit=1)
+                if len(parts) < 2: continue
+                ts_str = parts[0]
+                try:
+                    import datetime
+                    t = datetime.datetime.strptime(ts_str, "%H:%M:%S.%f").time()
+                    dt = datetime.datetime.combine(datetime.date.today(), t)
+                except ValueError:
+                    continue
+
+                content = parts[1]
+                syscall_type = content.split()[0]
+                if syscall_type not in ["open", "openat", "open_nocancel", "open_extended", "connect", "sendto"]:
+                    continue
+
+                # Find the most recently started payload before this syscall
+                best_record = None
+                for r in self.records:
+                    if r.start_time and r.start_time <= dt:
+                        best_record = r
+
+                # Check if it falls within the active window or up to 1 second after
+                if best_record and best_record.end_time:
+                    import datetime
+                    if dt <= best_record.end_time + datetime.timedelta(seconds=1.0):
+                        clean_line = re.sub(r'\s+', ' ', content).strip()
+                        best_record.syscalls.append(f"{ts_str} {clean_line}")
+
+class FuzzPayloadRecord:
+    def __init__(self, idx, payload):
+        self.idx = idx
+        self.payload = payload
+        self.start_time = None
+        self.end_time = None
+        self.syscalls = []
+        self.response = None
 
 
 class AppManager:
@@ -713,7 +742,9 @@ class AppManager:
                     await ws.close()
                     print("  ✅ Tauri application is ready and listening!")
                     if self.enable_monitor:
-                        self.monitor = SystemMonitor(self.proc.pid)
+                        if self.monitor is None:
+                            self.monitor = SystemMonitor("tauriscan")
+                            open(self.monitor.log_file, "w").close() # Clear on first run
                         await self.monitor.start()
                     return
                 except Exception:
@@ -738,7 +769,7 @@ class AppManager:
             except Exception:
                 pass
             try:
-                subprocess.run(["pkill", "-9", "-f", "taurifuzz"], capture_output=True)
+                subprocess.run(["pkill", "-9", "-f", "tauriscan"], capture_output=True)
             except Exception:
                 pass
             try:
@@ -748,7 +779,12 @@ class AppManager:
             self.proc = None
 
 
-async def run_fuzzer(payloads: list[dict], app_manager: AppManager | None = None) -> None:
+async def run_fuzzer(
+    payloads: list[dict], 
+    app_manager: AppManager | None = None,
+    total_endpoints: int = 0,
+    json_report_path: str | None = None
+) -> None:
     """
     Run the fuzzer: connect to the WebSocket server, send every payload,
     collect results, and print a final summary with findings.
@@ -756,11 +792,13 @@ async def run_fuzzer(payloads: list[dict], app_manager: AppManager | None = None
     Args:
         payloads: A list of dicts, each with 'command' and 'args' keys.
         app_manager: Optional AppManager instance managing the Tauri subprocess.
+        total_endpoints: Total number of IPC endpoints discovered.
+        json_report_path: Optional path to save JSON metrics report.
     """
-    stats = FuzzStats(total=len(payloads))
+    stats = FuzzStats(total=len(payloads), total_endpoints_discovered=total_endpoints)
 
     print("=" * 70)
-    print("🔧  TauriFuzz Orchestrator")
+    print("🔧  TauriScan Orchestrator")
     print(f"    Target : {WS_URI}")
     print(f"    Payloads: {len(payloads)}")
     print("=" * 70)
@@ -782,24 +820,57 @@ async def run_fuzzer(payloads: list[dict], app_manager: AppManager | None = None
         args_preview = truncate(json.dumps(payload.get("args", {})))
         print(f"[{idx}/{len(payloads)}] 📤 {cmd}  {args_preview}")
 
+        if cmd not in stats.command_stats:
+            stats.command_stats[cmd] = CommandStats()
+        stats.command_stats[cmd].payloads_sent += 1
+
+        record = None
+        if app_manager and app_manager.monitor:
+            record = FuzzPayloadRecord(idx, payload)
+            import datetime
+            record.start_time = datetime.datetime.now()
+            app_manager.monitor.records.append(record)
+
         response = await send_payload(ws, payload)
 
-        # Handle disconnection with automated recovery or reconnect attempt
-        if response["status"] == "disconnect":
-            stats.disconnect += 1
-            print(f"  💥 Disconnected! ({response.get('error', '')})")
-            stats.findings.append(
-                Finding(
-                    category="Crash / Disconnect",
-                    severity="HIGH",
-                    payload=payload,
-                    response=response,
-                    description=f"Connection lost while processing '{cmd}' — possible crash",
+        if record:
+            import datetime
+            record.end_time = datetime.datetime.now()
+            record.response = response
+
+        # Handle disconnection or deadlock with automated recovery
+        if response["status"] in ("disconnect", "deadlock"):
+            if response["status"] == "deadlock":
+                stats.deadlock += 1
+                stats.command_stats[cmd].deadlock += 1
+                stats.command_stats[cmd].vulnerabilities_found.add("Deadlock / Hard Hang")
+                print(f"  💥 Deadlock! ({response.get('error', '')})")
+                stats.findings.append(
+                    Finding(
+                        category="Deadlock / Hard Hang",
+                        severity="HIGH",
+                        payload=payload,
+                        response=response,
+                        description=f"No response within 15s — process completely deadlocked",
+                    )
                 )
-            )
+            else:
+                stats.disconnect += 1
+                stats.command_stats[cmd].disconnect += 1
+                stats.command_stats[cmd].vulnerabilities_found.add("Crash / Disconnect")
+                print(f"  💥 Disconnected! ({response.get('error', '')})")
+                stats.findings.append(
+                    Finding(
+                        category="Crash / Disconnect",
+                        severity="HIGH",
+                        payload=payload,
+                        response=response,
+                        description=f"Connection lost while processing '{cmd}' — possible crash",
+                    )
+                )
 
             if app_manager:
-                print("  🔄 Crash detected! AppManager initiating automated recovery...")
+                print("  🔄 Crash/Deadlock detected! AppManager initiating automated recovery...")
                 await app_manager.restart()
             else:
                 print("  🔄 Attempting reconnect in 3s...")
@@ -820,32 +891,32 @@ async def run_fuzzer(payloads: list[dict], app_manager: AppManager | None = None
         status = response.get("status", "unknown")
         if status == "success":
             stats.success += 1
+            stats.command_stats[cmd].success += 1
             result_preview = truncate(str(response.get("result", "")))
             print(f"  ✅ Success: {result_preview}")
         elif status == "timeout":
             stats.timeout += 1
+            stats.command_stats[cmd].timeout += 1
+            stats.command_stats[cmd].vulnerabilities_found.add("Timeout / Hang")
             print(f"  ⏱️  Timeout ({DEFAULT_TIMEOUT}s)")
         elif status == "error":
             stats.error += 1
+            stats.command_stats[cmd].error += 1
             err = truncate(str(response.get("error", "")))
             print(f"  ❌ Error: {err}")
         else:
             stats.error += 1
+            stats.command_stats[cmd].error += 1
             print(f"  ❓ Unknown status: {status}")
 
         # Check for findings
         new_findings = check_findings(payload, response)
         for finding in new_findings:
             stats.findings.append(finding)
+            stats.command_stats[cmd].vulnerabilities_found.add(finding.category)
             print(
                 f"  🚨 FINDING [{finding.severity}] {finding.category}: {finding.description}"
             )
-
-        # Check for OS-level monitor alerts
-        if app_manager and app_manager.monitor and app_manager.monitor.alerts:
-            for alert in app_manager.monitor.alerts:
-                print(f"  🛡️ OS MONITOR ALERT: {alert}")
-            app_manager.monitor.alerts.clear()
 
         print()
 
@@ -855,32 +926,98 @@ async def run_fuzzer(payloads: list[dict], app_manager: AppManager | None = None
     except Exception:
         pass
 
+
+
+    if app_manager and app_manager.monitor:
+        await app_manager.monitor.stop()
+        app_manager.monitor.correlate()
+        print("\n" + "=" * 70)
+        print("🛡️  Correlated OS Monitor Syscalls")
+        print("=" * 70)
+        for r in app_manager.monitor.records:
+            if r.syscalls:
+                cmd = r.payload.get("command", "?")
+                print(f"[{r.idx}] 📤 {cmd}:")
+                for sys_log in r.syscalls:
+                    print(f"  -> {sys_log}")
+
+                # Register a finding for the correlated OS activity
+                stats.findings.append(
+                    Finding(
+                        category="OS Monitor Trace",
+                        severity="CRITICAL",
+                        payload=r.payload,
+                        response=r.response or {},
+                        description=f"OS-level syscall trace confirmed execution: {r.syscalls[0]} ({len(r.syscalls)} total syscalls)"
+                    )
+                )
+                if cmd in stats.command_stats:
+                    stats.command_stats[cmd].vulnerabilities_found.add("OS Monitor Trace")
+        print()
+
     # --- summary ---
-    print()
+    print("\n" + "=" * 70)
+    print("📊  Evaluation Metrics Summary")
     print("=" * 70)
-    print("📊  Summary")
-    print("=" * 70)
-    print(f"  Total payloads : {stats.total}")
-    print(f"  ✅ Success      : {stats.success}")
-    print(f"  ❌ Error        : {stats.error}")
-    print(f"  ⏱️  Timeout      : {stats.timeout}")
-    print(f"  💥 Disconnect   : {stats.disconnect}")
+    
+    exercised = len(stats.command_stats)
+    coverage_pct = (exercised / stats.total_endpoints_discovered * 100) if stats.total_endpoints_discovered > 0 else 0
+    print("Endpoint Coverage:")
+    print(f"  Total IPC Endpoints Discovered : {stats.total_endpoints_discovered}")
+    print(f"  Endpoints Exercised by Scanner : {exercised} / {stats.total_endpoints_discovered} ({coverage_pct:.0f}% Coverage)")
     print()
 
-    if stats.findings:
-        print(f"🚨 {len(stats.findings)} FINDING(S):")
-        print("-" * 70)
-        for i, f in enumerate(stats.findings, start=1):
-            print(f"  {i}. [{f.severity}] {f.category}")
-            print(f"     {f.description}")
-            print(f"     Payload: {truncate(json.dumps(f.payload), 200)}")
-            resp_preview = {k: truncate(str(v), 80) for k, v in f.response.items()}
-            print(f"     Response: {truncate(json.dumps(resp_preview), 200)}")
-            print()
-    else:
-        print("✅ No findings — all payloads handled safely.")
+    print("Vulnerability Detection Results:")
+    print(f"  {'Endpoint':<25}  {'Exploited?':<10}  {'Vulnerabilities Found':<30}  {'Stability':<15}")
+    print(f"  {'-'*25}  {'-'*10}  {'-'*30}  {'-'*15}")
+
+    for c, c_stats in stats.command_stats.items():
+        exploited = "✅ YES" if c_stats.vulnerabilities_found else "❌ NO"
+        vulns = ", ".join(sorted(c_stats.vulnerabilities_found)) if c_stats.vulnerabilities_found else "None"
+        
+        if c_stats.disconnect == 0 and c_stats.deadlock == 0 and c_stats.timeout == 0:
+            stability = "100% stable"
+        else:
+            stability = f"C:{c_stats.disconnect} D:{c_stats.deadlock} T:{c_stats.timeout}"
+            
+        print(f"  {c:<25}  {exploited:<10}  {truncate(vulns, 30):<30}  {stability:<15}")
 
     print("=" * 70)
+
+    if json_report_path:
+        import json as json_mod
+        from pathlib import Path as Path_obj
+        report = {
+            "metrics": {
+                "total_endpoints_discovered": stats.total_endpoints_discovered,
+                "endpoints_exercised": exercised,
+                "coverage_percentage": coverage_pct,
+                "throughput": {
+                    "total_payloads": stats.total,
+                    "success": stats.success,
+                    "error": stats.error,
+                    "timeout": stats.timeout,
+                    "deadlock": stats.deadlock,
+                    "disconnect": stats.disconnect
+                }
+            },
+            "endpoints": {}
+        }
+        for c, c_stats in stats.command_stats.items():
+            report["endpoints"][c] = {
+                "exploited": bool(c_stats.vulnerabilities_found),
+                "vulnerabilities": sorted(list(c_stats.vulnerabilities_found)),
+                "payloads_sent": c_stats.payloads_sent,
+                "crashes": c_stats.disconnect,
+                "deadlocks": c_stats.deadlock,
+                "timeouts": c_stats.timeout,
+            }
+        
+        try:
+            Path_obj(json_report_path).write_text(json_mod.dumps(report, indent=2), encoding="utf-8")
+            print(f"\n📄 JSON report saved to: {json_report_path}")
+        except Exception as e:
+            print(f"\n⚠️ Failed to save JSON report: {e}")
 
 
 def load_payloads(path: str) -> list[dict]:
@@ -932,8 +1069,20 @@ async def async_main(args, payloads=None):
     if app_manager:
         await app_manager.start()
 
+    total_endpoints = 0
     try:
-        await run_fuzzer(payloads, app_manager=app_manager)
+        commands = await fetch_commands(WS_URI)
+        total_endpoints = len(commands)
+    except Exception:
+        pass
+
+    try:
+        await run_fuzzer(
+            payloads, 
+            app_manager=app_manager, 
+            total_endpoints=total_endpoints,
+            json_report_path=args.json_report
+        )
     finally:
         if app_manager:
             await app_manager.stop()
@@ -942,7 +1091,7 @@ async def async_main(args, payloads=None):
 def main() -> None:
     """Entry point: parse CLI arguments and launch the async fuzzer."""
     parser = argparse.ArgumentParser(
-        description="TauriFuzz — WebSocket fuzzing orchestrator for Tauri plugins",
+        description="TauriScan — Dynamic security scanner for Tauri applications",
     )
 
     # -- Modes ----------------------------------------------------------------
@@ -983,6 +1132,12 @@ def main() -> None:
         "--monitor",
         action="store_true",
         help="Enable OS-level system monitoring (e.g. fs_usage/lsof on macOS) to confirm vulnerability exploitation at the syscall level.",
+    )
+    parser.add_argument(
+        "--json-report",
+        default=None,
+        metavar="FILE",
+        help="Path to save the JSON evaluation metrics report.",
     )
 
     args = parser.parse_args()

@@ -1,0 +1,29 @@
+{
+  "target": "ws://127.0.0.1:31337",
+  "commands": {
+    "read_file": {
+      "arg": "path",
+      "payload_type": "path_traversal"
+    },
+    "list_directory": {
+      "arg": "path",
+      "payload_type": "path_traversal"
+    },
+    "fetch_url": {
+      "arg": "url",
+      "payload_type": "ssrf"
+    },
+    "process_data": {
+      "arg": "data",
+      "payload_type": "oversized"
+    }
+  },
+  "available_payload_types": [
+    "numeric_boundary",
+    "oversized",
+    "path_traversal",
+    "ssrf",
+    "string_injection",
+    "type_confusion"
+  ]
+}

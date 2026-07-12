@@ -3553,6 +3553,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-secure-utils"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "url",
+]
+
+[[package]]
 name = "tauri-utils"
 version = "2.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3602,7 +3610,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "taurifuzz"
+name = "tauriscan"
 version = "0.1.0"
 dependencies = [
  "reqwest 0.12.28",
@@ -3611,6 +3619,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-fuzz-harness",
+ "tauri-secure-utils",
  "tokio",
 ]
 

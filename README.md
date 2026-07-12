@@ -1,30 +1,42 @@
-# TauriFuzz — Intentionally Vulnerable Tauri Application
+# TauriScan — Tauri IPC Security Scanner & Research Project
 
-> ⚠️ **WARNING**: This application is intentionally vulnerable. Do not deploy in production or on untrusted networks.
+> ⚠️ **WARNING**: This repository contains intentionally vulnerable code used as a ground-truth testbed. Do not deploy any applications from this repository in production or on untrusted networks.
 
-A deliberately insecure Tauri v2 application built as a testbed for IPC fuzzing and security research. This is part of a Georgia Tech CS-6727 capstone project investigating parser discrepancies and security flaws in the Tauri Inter-Process Communication (IPC) boundary.
+TauriScan is a security research project and automated Dynamic Application Security Testing (DAST) suite created as part of a Georgia Tech CS-6727 capstone project. 
 
-## Summary
+The primary goal of this project is to investigate and prove that parser discrepancies, path confusion, and deserialization flaws at the Inter-Process Communication (IPC) boundary of zero-egress desktop applications (like Tauri) can be systematically discovered via automated dynamic testing.
 
-This repository contains an intentionally vulnerable Tauri v2 application, a Tauri plugin for IPC-based fuzzing, and a fuzzing orchestrator.
+While desktop frameworks like Tauri provide memory safety via Rust, they are still vulnerable to logic flaws when frontend JavaScript security filters and backend native execution engines disagree on the structural intent of a payload. TauriScan systematically injects malicious payloads into the real IPC bridge to uncover Path Traversal, Server-Side Request Forgery (SSRF), and Type Confusion vulnerabilities.
 
-## Vulnerabilities
+## Repository Structure
 
-| # | Handler | Vulnerability | Description |
-|---|---------|--------------|-------------|
-| 1 | `read_file` | Path Traversal | Concatenates user input to base path without canonicalization |
-| 2 | `list_directory` | Path Traversal | Same path concatenation flaw for directory listing |
-| 3 | `fetch_url` | SSRF | Fetches any URL without scheme/domain allowlisting |
-| 4 | `process_data` | Type Confusion | Blindly trusts JSON structure, panics on unexpected types |
+This repository is structured into several interconnected components. For detailed information on any specific component, please refer to its dedicated README:
 
-## Prerequisites
+- **[TauriScan Orchestrator (`/orchestrator`)](orchestrator/README.md)**
+  A Python-based fuzzing client that manages payload generation, dispatching, and response analysis to detect security vulnerabilities.
 
+- **[Tauri Fuzz Harness Plugin (`/src-tauri/tauri-plugin-fuzz-harness`)](src-tauri/tauri-plugin-fuzz-harness/README.md)**
+  A drop-in Tauri v2 plugin that enables dynamic IPC fuzzing by opening a WebSocket and injecting payloads directly into the WebView's JavaScript context.
+
+- **[Tauri Secure Utils (`/src-tauri/tauri-secure-utils`)](src-tauri/tauri-secure-utils/README.md)**
+  A library of drop-in secure Rust macros and functions (e.g., path canonicalization, SSRF prevention) that developers can implement to secure custom `invoke` handlers against parser confusion.
+
+- **[Tauri vs. Electron IPC Experiment (`/experiment`)](experiment/README.md)**
+  A comparative testbed containing a minimal Electron application to evaluate whether Tauri's architectural advantages extend to parser logic vulnerabilities when compared to Node.js / Electron.
+
+- **Intentionally Vulnerable Tauri App (`/src-tauri` & `/ui`)**
+  The root of this project serves as a "ground truth" testbed application containing known IPC security flaws used to prove the efficacy of the TauriScan orchestrator.
+
+## Getting Started (Vulnerable Testbed)
+
+To run the intentionally vulnerable testbed application locally:
+
+### Prerequisites
 - [Rust](https://www.rust-lang.org/tools/install) (latest stable)
 - [Node.js](https://nodejs.org/) via nvm (LTS version)
 - [Tauri CLI v2](https://v2.tauri.app/start/create-project/)
 
-## Setup
-
+### Setup
 ```bash
 # Use correct Node version
 nvm use
@@ -34,19 +46,9 @@ npm install
 
 # Run in development mode
 cargo tauri dev
-
-# Build for production
-cargo tauri build
 ```
 
-## Project Structure
-
-- [`ui/`](ui/) — Intentionally vulnerable app frontend (vanilla HTML/JS)
-- [`src-tauri/`](src-tauri/) — Intentionally vulnerable Tauri app backend
-- [`safe_files/`](safe_files/) — Intended file access sandbox directory
-- [`orchestrator/`](orchestrator/) — Python fuzzing orchestrator
-- [`src-tauri/tauri-plugin-fuzz-harness/`](src-tauri/tauri-plugin-fuzz-harness/) — Tauri plugin that enables IPC-based fuzzing
+Once the testbed is running, refer to the **[Orchestrator README](orchestrator/README.md)** to begin scanning the application for vulnerabilities.
 
 ## License
-
-This project is for educational and research purposes only.
+This project is for educational and security research purposes only.

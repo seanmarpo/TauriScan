@@ -1,0 +1,85 @@
+{
+  "metrics": {
+    "total_endpoints_discovered": 7,
+    "endpoints_exercised": 7,
+    "coverage_percentage": 100.0,
+    "throughput": {
+      "total_payloads": 58,
+      "success": 8,
+      "error": 44,
+      "timeout": 2,
+      "deadlock": 0,
+      "disconnect": 4
+    }
+  },
+  "endpoints": {
+    "read_file": {
+      "exploited": true,
+      "vulnerabilities": [
+        "OS Monitor Trace",
+        "Path Traversal"
+      ],
+      "payloads_sent": 10,
+      "crashes": 0,
+      "deadlocks": 0,
+      "timeouts": 0
+    },
+    "list_directory": {
+      "exploited": true,
+      "vulnerabilities": [
+        "OS Monitor Trace",
+        "Path Traversal"
+      ],
+      "payloads_sent": 10,
+      "crashes": 0,
+      "deadlocks": 0,
+      "timeouts": 0
+    },
+    "fetch_url": {
+      "exploited": true,
+      "vulnerabilities": [
+        "OS Monitor Trace",
+        "Timeout / Hang",
+        "Timeout / Possible Crash"
+      ],
+      "payloads_sent": 7,
+      "crashes": 0,
+      "deadlocks": 0,
+      "timeouts": 2
+    },
+    "process_data": {
+      "exploited": true,
+      "vulnerabilities": [
+        "Crash / Disconnect"
+      ],
+      "payloads_sent": 4,
+      "crashes": 4,
+      "deadlocks": 0,
+      "timeouts": 0
+    },
+    "secure_read_file": {
+      "exploited": false,
+      "vulnerabilities": [],
+      "payloads_sent": 10,
+      "crashes": 0,
+      "deadlocks": 0,
+      "timeouts": 0
+    },
+    "secure_list_directory": {
+      "exploited": false,
+      "vulnerabilities": [],
+      "payloads_sent": 10,
+      "crashes": 0,
+      "deadlocks": 0,
+      "timeouts": 0
+    },
+    "secure_fetch_url": {
+      "exploited": false,
+      "vulnerabilities": [],
+      "payloads_sent": 7,
+      "crashes": 0,
+      "deadlocks": 0,
+      "timeouts": 0
+    }
+  }
+}

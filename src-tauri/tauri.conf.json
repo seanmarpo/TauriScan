@@ -1,7 +1,7 @@
 {
-  "productName": "TauriFuzz",
+  "productName": "TauriScan",
   "version": "0.1.0",
-  "identifier": "com.taurifuzz.vulnerable-app",
+  "identifier": "com.tauriscan.vulnerable-app",
   "build": {
     "frontendDist": "../ui"
   },
@@ -9,7 +9,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "TauriFuzz - Vulnerable Target App",
+        "title": "TauriScan - Vulnerable Target App",
         "width": 900,
         "height": 700
       }

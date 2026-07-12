@@ -1,5 +1,5 @@
 {
-  "name": "taurifuzz",
+  "name": "tauriscan",
   "version": "1.0.0",
   "description": "Intentionally vulnerable Tauri application for IPC security research",
   "main": "index.js",
@@ -10,16 +10,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/seanmarpo/TauriFuzz.git"
+    "url": "git+https://github.com/seanmarpo/TauriScan.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/seanmarpo/TauriFuzz/issues"
+    "url": "https://github.com/seanmarpo/TauriScan/issues"
   },
-  "homepage": "https://github.com/seanmarpo/TauriFuzz#readme",
+  "homepage": "https://github.com/seanmarpo/TauriScan#readme",
   "dependencies": {
     "@tauri-apps/api": "^2.11.0"
   }
