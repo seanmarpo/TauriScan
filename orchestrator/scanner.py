@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Fuzzing orchestrator for Tauri plugin WebSocket listener.
 
@@ -19,7 +18,9 @@ import re
 import signal
 import subprocess
 import sys
+import time
 import uuid
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from websockets.exceptions import ConnectionClosed, InvalidURI, WebSocketExcepti
 WS_URI = "ws://127.0.0.1:31337"
 DEFAULT_TIMEOUT = 15
 DEFAULT_CONFIG_PATH = "scan_config.json"
+RUN_ID = str(uuid.uuid4())[:8]
 
 # ---------------------------------------------------------------------------
 # Preset payload collections keyed by vulnerability category.
@@ -36,25 +38,22 @@ DEFAULT_CONFIG_PATH = "scan_config.json"
 # ---------------------------------------------------------------------------
 PAYLOAD_PRESETS: dict[str, list] = {
     "path_traversal": [
-        ".",
-        "../../../etc/passwd",
-        "....//....//....//etc/passwd",
-        "..\\..\\..\\etc\\passwd",
-        "%2e%2e%2f%2e%2e%2fetc%2fpasswd",
-        "..%252f..%252f..%252fetc/passwd",
-        "/etc/passwd",
-        "/",
-        "../../..",
+        "../../../tmp/fuzz_{UUID}",
+        "....//....//....//tmp/fuzz_{UUID}",
+        "..\\..\\..\\tmp\\fuzz_{UUID}",
+        "%2e%2e%2f%2e%2e%2ftmp%2ffuzz_{UUID}",
+        "..%252f..%252f..%252ftmp/fuzz_{UUID}",
+        "/tmp/fuzz_{UUID}",
+        "../../../..",
         "/etc",
     ],
     "ssrf": [
-        "https://httpbin.org/get",
-        "http://127.0.0.1",
-        "http://169.254.169.254/latest/meta-data/",
-        "file:///etc/passwd",
-        "http://[::1]/",
-        "http://0x7f000001/",
-        "http://localhost/",
+        "http://127.0.0.1:31337/{UUID}",
+        "http://169.254.169.254/latest/meta-data/{UUID}",
+        "file:///tmp/fuzz_{UUID}",
+        "http://[::1]/{UUID}",
+        "http://0x7f000001/{UUID}",
+        "http://localhost/{UUID}",
     ],
     "type_confusion": [
         None,
@@ -76,7 +75,7 @@ PAYLOAD_PRESETS: dict[str, list] = {
         "",
         " ",
         "A" * 100_000,
-        "<script>alert(1)</script>",
+        "<script>alert('{UUID}')</script>",
         "'; DROP TABLE users; --",
         "${7*7}",
         "{{7*7}}",
@@ -115,95 +114,6 @@ PAYLOAD_TYPE_DESCRIPTIONS: dict[str, str] = {
     "oversized": "Extremely large strings, deeply nested objects, huge arrays",
 }
 
-TEST_PAYLOADS = [
-    # Path traversal — read_file
-    {
-        "command": "read_file",
-        "args": {"path": "readme.txt"},
-    },  # Baseline: should succeed
-    {"command": "read_file", "args": {"path": "../../../etc/passwd"}},
-    {"command": "read_file", "args": {"path": "....//....//....//etc/passwd"}},
-    {"command": "read_file", "args": {"path": "..\\..\\..\\etc\\passwd"}},
-    {"command": "read_file", "args": {"path": "%2e%2e%2f%2e%2e%2fetc%2fpasswd"}},
-    {"command": "read_file", "args": {"path": "..%252f..%252f..%252fetc/passwd"}},
-    {"command": "read_file", "args": {"path": "/etc/passwd"}},
-    # Path traversal — list_directory
-    {"command": "list_directory", "args": {"path": "."}},  # Baseline: should succeed
-    {"command": "list_directory", "args": {"path": "../../.."}},
-    {"command": "list_directory", "args": {"path": "/etc"}},
-    {"command": "list_directory", "args": {"path": "/"}},
-    # SSRF — fetch_url
-    {"command": "fetch_url", "args": {"url": "https://httpbin.org/get"}},  # Baseline
-    {"command": "fetch_url", "args": {"url": "http://127.0.0.1:31337"}},
-    {
-        "command": "fetch_url",
-        "args": {"url": "http://169.254.169.254/latest/meta-data/"},
-    },
-    {"command": "fetch_url", "args": {"url": "file:///etc/passwd"}},
-    {"command": "fetch_url", "args": {"url": "http://[::1]/"}},
-    {"command": "fetch_url", "args": {"url": "http://0x7f000001/"}},
-    # Type confusion — process_data
-    # Valid baseline
-    {
-        "command": "process_data",
-        "args": {
-            "data": {
-                "name": "test",
-                "age": 25,
-                "admin": False,
-                "metadata": {"role": "user"},
-            }
-        },
-    },
-    # Wrong types
-    {
-        "command": "process_data",
-        "args": {
-            "data": {
-                "name": 12345,
-                "age": "not_a_number",
-                "admin": "yes",
-                "metadata": {"role": None},
-            }
-        },
-    },
-    # Missing fields
-    {"command": "process_data", "args": {"data": {}}},
-    {"command": "process_data", "args": {"data": {"name": "test"}}},
-    # Wrong top-level type
-    {"command": "process_data", "args": {"data": "just a string"}},
-    {"command": "process_data", "args": {"data": [1, 2, 3]}},
-    {"command": "process_data", "args": {"data": None}},
-    # Deeply nested
-    {
-        "command": "process_data",
-        "args": {
-            "data": {
-                "name": "test",
-                "age": 25,
-                "admin": False,
-                "metadata": {
-                    "role": "user",
-                    "nested": {"a": {"b": {"c": {"d": "deep"}}}},
-                },
-            }
-        },
-    },
-    # Oversized values
-    {
-        "command": "process_data",
-        "args": {
-            "data": {
-                "name": "A" * 100000,
-                "age": 1e308,
-                "admin": False,
-                "metadata": {"role": "user"},
-            }
-        },
-    },
-]
-
-SSRF_INDICATORS = ["127.0.0.1", "169.254", "file://", "localhost", "[::1]", "0x7f"]
 
 
 @dataclass
@@ -221,8 +131,6 @@ class Finding:
 class CommandStats:
     """Statistics for a specific Tauri command/endpoint."""
     payloads_sent: int = 0
-    success: int = 0
-    error: int = 0
     timeout: int = 0
     disconnect: int = 0
     deadlock: int = 0
@@ -233,54 +141,12 @@ class FuzzStats:
     """Accumulated statistics for a fuzz run."""
 
     total: int = 0
-    success: int = 0
-    error: int = 0
     timeout: int = 0
     disconnect: int = 0
     deadlock: int = 0
     findings: list = field(default_factory=list)
     command_stats: dict[str, CommandStats] = field(default_factory=dict)
     total_endpoints_discovered: int = 0
-
-
-def is_path_traversal_finding(payload: dict, response: dict) -> Finding | None:
-    """Check if a response indicates a successful path traversal."""
-    cmd = payload.get("command", "")
-    if cmd not in ("read_file", "list_directory"):
-        return None
-    if response.get("status") != "success":
-        return None
-
-    path_arg = payload.get("args", {}).get("path", "")
-    if ".." in path_arg or path_arg.startswith("/"):
-        return Finding(
-            category="Path Traversal",
-            severity="CRITICAL",
-            payload=payload,
-            response=response,
-            description=f"{cmd} succeeded with path: {path_arg}",
-        )
-    return None
-
-
-def is_ssrf_finding(payload: dict, response: dict) -> Finding | None:
-    """Check if a response indicates a successful SSRF."""
-    if payload.get("command") != "fetch_url":
-        return None
-    if response.get("status") != "success":
-        return None
-
-    url = payload.get("args", {}).get("url", "")
-    for indicator in SSRF_INDICATORS:
-        if indicator in url.lower():
-            return Finding(
-                category="SSRF",
-                severity="HIGH",
-                payload=payload,
-                response=response,
-                description=f"fetch_url succeeded with suspicious URL: {url}",
-            )
-    return None
 
 
 def is_panic_finding(payload: dict, response: dict) -> Finding | None:
@@ -318,12 +184,9 @@ def is_timeout_finding(payload: dict, response: dict) -> Finding | None:
 def check_findings(payload: dict, response: dict) -> list[Finding]:
     """Run all finding detectors against a payload/response pair."""
     detectors = [
-        is_path_traversal_finding,
-        is_ssrf_finding,
         is_panic_finding,
         is_timeout_finding,
     ]
-    import datetime
     return [f for det in detectors if (f := det(payload, response)) is not None]
 
 
@@ -369,7 +232,7 @@ async def send_payload(ws, payload: dict, timeout: int = DEFAULT_TIMEOUT) -> dic
         raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
         response = json.loads(raw)
         return response
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {
             "id": msg_id,
             "status": "deadlock",
@@ -630,17 +493,25 @@ class SystemMonitor:
     confirm successful vulnerability exploitation (e.g. unauthorized filesystem/network access).
     """
     def __init__(self, target_name: str = "tauriscan"):
-        self.target_name = target_name
+        self.app_name = target_name
         self.proc: asyncio.subprocess.Process | None = None
         self.log_file = "/tmp/fuzz_fs.log"
+        self.nettop_proc: asyncio.subprocess.Process | None = None
+        self.nettop_log_file = "/tmp/fuzz_nettop.log"
         self.records = []
 
     async def start(self):
-        print(f"  🛡️ SystemMonitor: Starting background OS monitor logging to {self.log_file}...")
+        print(f"  🛡️ SystemMonitor: Starting background OS monitor logging to {self.log_file} and {self.nettop_log_file}...")
         try:
             self.proc = await asyncio.create_subprocess_exec(
-                "sudo", "-n", "fs_usage", "-w", self.target_name,
+                "sudo", "-n", "fs_usage", "-w", "-f", "network", "-f", "filesys", self.app_name,
                 stdout=open(self.log_file, "a"),
+                stderr=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.DEVNULL
+            )
+            self.nettop_proc = await asyncio.create_subprocess_exec(
+                "nettop", "-p", self.app_name, "-n", "-x", "-l", "0",
+                stdout=open(self.nettop_log_file, "a"),
                 stderr=asyncio.subprocess.DEVNULL,
                 stdin=asyncio.subprocess.DEVNULL
             )
@@ -648,28 +519,32 @@ class SystemMonitor:
                 await asyncio.wait_for(self.proc.wait(), timeout=1.0)
                 if self.proc.returncode is not None:
                     print("  ❌ SystemMonitor: 'sudo fs_usage' failed (did you forget to run `sudo -v` first?). Exiting.")
-                    import sys
                     sys.exit(1)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass # Still running, good!
         except Exception as exc:
             print(f"  ❌ SystemMonitor: failed to start ({exc})")
-            import sys
             sys.exit(1)
 
     async def stop(self):
         if self.proc:
             try:
                 self.proc.terminate()
-            except Exception:
+            except OSError:
                 pass
-            import subprocess
-            subprocess.run(["sudo", "-n", "pkill", "-15", "fs_usage"], capture_output=True)
-            await asyncio.sleep(0.5)
+            subprocess.run(["sudo", "-n", "pkill", "-15", "fs_usage"], capture_output=True, check=False)
+
+        if self.nettop_proc:
+            try:
+                self.nettop_proc.terminate()
+            except OSError:
+                pass
+            subprocess.run(["pkill", "-15", "nettop"], capture_output=True, check=False)
+
+        await asyncio.sleep(0.5)
 
     def correlate(self):
         print(f"\n🔬 SystemMonitor: Correlating OS-level syscalls from trace log...")
-        import os
         if not os.path.exists(self.log_file):
             return
 
@@ -678,30 +553,72 @@ class SystemMonitor:
                 parts = line.split(maxsplit=1)
                 if len(parts) < 2: continue
                 ts_str = parts[0]
-                try:
-                    import datetime
-                    t = datetime.datetime.strptime(ts_str, "%H:%M:%S.%f").time()
-                    dt = datetime.datetime.combine(datetime.date.today(), t)
-                except ValueError:
-                    continue
-
                 content = parts[1]
-                syscall_type = content.split()[0]
-                if syscall_type not in ["open", "openat", "open_nocancel", "open_extended", "connect", "sendto"]:
-                    continue
 
-                # Find the most recently started payload before this syscall
-                best_record = None
-                for r in self.records:
-                    if r.start_time and r.start_time <= dt:
-                        best_record = r
+                if RUN_ID in content:
+                    match = re.search(f"fuzz_{RUN_ID}_(\\d+)", content)
+                    idx = int(match.group(1)) if match else None
+                    clean_line = re.sub(r'\\s+', ' ', content).strip()
 
-                # Check if it falls within the active window or up to 1 second after
-                if best_record and best_record.end_time:
-                    import datetime
-                    if dt <= best_record.end_time + datetime.timedelta(seconds=1.0):
-                        clean_line = re.sub(r'\s+', ' ', content).strip()
-                        best_record.syscalls.append(f"{ts_str} {clean_line}")
+                    for r in self.records:
+                        if r.idx == idx or (idx is None and r.start_time and r.end_time):
+                            r.syscalls.append(f"{ts_str} {clean_line}")
+                            if idx is not None:
+                                break
+
+        if os.path.exists(self.nettop_log_file):
+            ip_pattern = re.compile(r'(?:http|https)://([0-9\.]+|(?:\[[0-9a-fA-F:]+\])|localhost)')
+
+            with open(self.nettop_log_file, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    for r in self.records:
+                        url = str(r.payload.get("args", {}).get("url", ""))
+                        if not url:
+                            continue
+
+                        match = ip_pattern.search(url)
+                        if not match:
+                            continue
+
+                        ip = match.group(1).strip("[]")
+                        if ip == "0x7f000001" or ip == "localhost":
+                            ip = "127.0.0.1"
+
+                        # Determine expected port (default to 80 for HTTP)
+                        port = 80
+                        try:
+                            # e.g., http://127.0.0.1:8080/path -> 8080
+                            host_part = url.split("://")[1].split("/")[0]
+                            if ":" in host_part:
+                                port = int(host_part.split(":")[1])
+                        except Exception:
+                            pass
+
+                        # Look for exact IP:Port match in nettop output
+                        target_str = f"{ip}:{port}"
+                        if target_str in line:
+                            # Verify timestamp constraint if start/end times exist
+                            time_match = re.match(r'^(\d{2}:\d{2}:\d{2}\.\d+)', line)
+                            if time_match and r.start_time and r.end_time:
+                                try:
+                                    # Parse nettop timestamp
+                                    # Nettop only gives HH:MM:SS.frac, so we combine with today's date
+                                    today_date = datetime.now().strftime("%Y-%m-%d")
+                                    time_str = time_match.group(1)
+                                    parts = time_str.split(".")
+                                    frac = parts[1][:6].ljust(6, '0')
+                                    line_time_str = f"{today_date} {parts[0]}.{frac}"
+                                    log_time = datetime.strptime(line_time_str, "%Y-%m-%d %H:%M:%S.%f").timestamp()
+
+                                    # r.start_time is float (from time.time())
+                                    if not (r.start_time - 1.0 <= log_time <= r.end_time + 1.0):
+                                        continue # skip if not within the payload window
+                                except Exception:
+                                    pass # fallback to append if parsing fails
+
+                            clean_line = re.sub(r'\\s+', ' ', line).strip()
+                            r.syscalls.append(f"[nettop] {clean_line}")
+
 
 class FuzzPayloadRecord:
     def __init__(self, idx, payload):
@@ -718,9 +635,9 @@ class AppManager:
     Manages the lifecycle of the target Tauri application (spawning, monitoring, restarting).
     Grants the orchestrator full control over the fuzzing workflow.
     """
-    def __init__(self, app_dir: str, enable_monitor: bool = False):
+    def __init__(self, app_dir: str, app_name: str):
         self.app_dir = app_dir
-        self.enable_monitor = enable_monitor
+        self.app_name = app_name
         self.proc: asyncio.subprocess.Process | None = None
         self.monitor: SystemMonitor | None = None
 
@@ -741,11 +658,11 @@ class AppManager:
                     ws = await websockets.connect(WS_URI)
                     await ws.close()
                     print("  ✅ Tauri application is ready and listening!")
-                    if self.enable_monitor:
-                        if self.monitor is None:
-                            self.monitor = SystemMonitor("tauriscan")
-                            open(self.monitor.log_file, "w").close() # Clear on first run
-                        await self.monitor.start()
+                    if self.monitor is None:
+                        self.monitor = SystemMonitor(self.app_name)
+                        open(self.monitor.log_file, "w").close() # Clear on first run
+                        open(self.monitor.nettop_log_file, "w").close() # Clear nettop log
+                    await self.monitor.start()
                     return
                 except Exception:
                     await asyncio.sleep(2.0)
@@ -766,21 +683,17 @@ class AppManager:
             print("  🛑 AppManager: Terminating Tauri subprocess and all child processes...")
             try:
                 os.killpg(self.proc.pid, signal.SIGKILL)
-            except Exception:
-                pass
-            try:
-                subprocess.run(["pkill", "-9", "-f", "tauriscan"], capture_output=True)
-            except Exception:
+            except ProcessLookupError:
                 pass
             try:
                 await asyncio.wait_for(self.proc.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             self.proc = None
 
 
 async def run_fuzzer(
-    payloads: list[dict], 
+    payloads: list[dict],
     app_manager: AppManager | None = None,
     total_endpoints: int = 0,
     json_report_path: str | None = None
@@ -816,6 +729,11 @@ async def run_fuzzer(
 
     # --- send payloads ---
     for idx, payload in enumerate(payloads, start=1):
+        payload_str = json.dumps(payload)
+        if "{UUID}" in payload_str:
+            payload_str = payload_str.replace("{UUID}", f"{RUN_ID}_{idx}")
+            payload = json.loads(payload_str)
+
         cmd = payload.get("command", "?")
         args_preview = truncate(json.dumps(payload.get("args", {})))
         print(f"[{idx}/{len(payloads)}] 📤 {cmd}  {args_preview}")
@@ -827,15 +745,13 @@ async def run_fuzzer(
         record = None
         if app_manager and app_manager.monitor:
             record = FuzzPayloadRecord(idx, payload)
-            import datetime
-            record.start_time = datetime.datetime.now()
+            record.start_time = time.time()
             app_manager.monitor.records.append(record)
 
         response = await send_payload(ws, payload)
 
         if record:
-            import datetime
-            record.end_time = datetime.datetime.now()
+            record.end_time = time.time()
             record.response = response
 
         # Handle disconnection or deadlock with automated recovery
@@ -851,7 +767,7 @@ async def run_fuzzer(
                         severity="HIGH",
                         payload=payload,
                         response=response,
-                        description=f"No response within 15s — process completely deadlocked",
+                        description="No response within 15s — process completely deadlocked",
                     )
                 )
             else:
@@ -890,8 +806,6 @@ async def run_fuzzer(
         # Tally status
         status = response.get("status", "unknown")
         if status == "success":
-            stats.success += 1
-            stats.command_stats[cmd].success += 1
             result_preview = truncate(str(response.get("result", "")))
             print(f"  ✅ Success: {result_preview}")
         elif status == "timeout":
@@ -900,13 +814,9 @@ async def run_fuzzer(
             stats.command_stats[cmd].vulnerabilities_found.add("Timeout / Hang")
             print(f"  ⏱️  Timeout ({DEFAULT_TIMEOUT}s)")
         elif status == "error":
-            stats.error += 1
-            stats.command_stats[cmd].error += 1
             err = truncate(str(response.get("error", "")))
             print(f"  ❌ Error: {err}")
         else:
-            stats.error += 1
-            stats.command_stats[cmd].error += 1
             print(f"  ❓ Unknown status: {status}")
 
         # Check for findings
@@ -923,7 +833,7 @@ async def run_fuzzer(
     # --- close ---
     try:
         await ws.close()
-    except Exception:
+    except websockets.exceptions.WebSocketException:
         pass
 
 
@@ -959,7 +869,7 @@ async def run_fuzzer(
     print("\n" + "=" * 70)
     print("📊  Evaluation Metrics Summary")
     print("=" * 70)
-    
+
     exercised = len(stats.command_stats)
     coverage_pct = (exercised / stats.total_endpoints_discovered * 100) if stats.total_endpoints_discovered > 0 else 0
     print("Endpoint Coverage:")
@@ -974,19 +884,17 @@ async def run_fuzzer(
     for c, c_stats in stats.command_stats.items():
         exploited = "✅ YES" if c_stats.vulnerabilities_found else "❌ NO"
         vulns = ", ".join(sorted(c_stats.vulnerabilities_found)) if c_stats.vulnerabilities_found else "None"
-        
+
         if c_stats.disconnect == 0 and c_stats.deadlock == 0 and c_stats.timeout == 0:
             stability = "100% stable"
         else:
             stability = f"C:{c_stats.disconnect} D:{c_stats.deadlock} T:{c_stats.timeout}"
-            
+
         print(f"  {c:<25}  {exploited:<10}  {truncate(vulns, 30):<30}  {stability:<15}")
 
     print("=" * 70)
 
     if json_report_path:
-        import json as json_mod
-        from pathlib import Path as Path_obj
         report = {
             "metrics": {
                 "total_endpoints_discovered": stats.total_endpoints_discovered,
@@ -994,8 +902,6 @@ async def run_fuzzer(
                 "coverage_percentage": coverage_pct,
                 "throughput": {
                     "total_payloads": stats.total,
-                    "success": stats.success,
-                    "error": stats.error,
                     "timeout": stats.timeout,
                     "deadlock": stats.deadlock,
                     "disconnect": stats.disconnect
@@ -1006,15 +912,15 @@ async def run_fuzzer(
         for c, c_stats in stats.command_stats.items():
             report["endpoints"][c] = {
                 "exploited": bool(c_stats.vulnerabilities_found),
-                "vulnerabilities": sorted(list(c_stats.vulnerabilities_found)),
+                "vulnerabilities": sorted(c_stats.vulnerabilities_found),
                 "payloads_sent": c_stats.payloads_sent,
                 "crashes": c_stats.disconnect,
                 "deadlocks": c_stats.deadlock,
                 "timeouts": c_stats.timeout,
             }
-        
+
         try:
-            Path_obj(json_report_path).write_text(json_mod.dumps(report, indent=2), encoding="utf-8")
+            Path(json_report_path).write_text(json.dumps(report, indent=2), encoding="utf-8")
             print(f"\n📄 JSON report saved to: {json_report_path}")
         except Exception as e:
             print(f"\n⚠️ Failed to save JSON report: {e}")
@@ -1060,7 +966,7 @@ def load_payloads(path: str) -> list[dict]:
 
 
 async def async_main(args, payloads=None):
-    app_manager = AppManager(args.spawn, enable_monitor=args.monitor) if args.spawn is not None else None
+    app_manager = AppManager(args.spawn, app_name=args.app_name) if args.spawn is not None else None
 
     if args.setup:
         await setup_mode(args.output, app_manager=app_manager)
@@ -1078,8 +984,8 @@ async def async_main(args, payloads=None):
 
     try:
         await run_fuzzer(
-            payloads, 
-            app_manager=app_manager, 
+            payloads,
+            app_manager=app_manager,
             total_endpoints=total_endpoints,
             json_report_path=args.json_report
         )
@@ -1129,9 +1035,9 @@ def main() -> None:
         help="Automatically launch the Tauri application via `cargo tauri dev` in the specified directory (default: current directory).",
     )
     parser.add_argument(
-        "--monitor",
-        action="store_true",
-        help="Enable OS-level system monitoring (e.g. fs_usage/lsof on macOS) to confirm vulnerability exploitation at the syscall level.",
+        "--app-name",
+        default="tauriscan",
+        help="Name of the target binary for OS monitoring (default: tauriscan).",
     )
     parser.add_argument(
         "--json-report",
@@ -1151,8 +1057,8 @@ def main() -> None:
         payloads = load_payloads(args.payload_file)
         print(f"📂 Loaded {len(payloads)} payloads from {args.payload_file}\n")
     else:
-        payloads = TEST_PAYLOADS
-        print(f"📦 Using {len(payloads)} built-in test payloads\n")
+        print("❌ Please provide a payload file, use --config, or run --setup.")
+        sys.exit(1)
 
     try:
         asyncio.run(async_main(args, payloads))

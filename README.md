@@ -52,3 +52,6 @@ Once the testbed is running, refer to the **[Orchestrator README](orchestrator/R
 
 ## License
 This project is for educational and security research purposes only.
+
+## AI Usage Disclaimer
+Google Gemini 3.1 Pro was utilized during the development of this project to assist in code generation, refactoring, and testing the code changes delivered. All AI-generated suggestions were thoroughly reviewed, verified, and adapted by the author to ensure accuracy and original intent.
